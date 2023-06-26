@@ -90,13 +90,8 @@ impl CtrDrbg {
         Ok(CtrDrbg { inner, entropy: EntropyHolder::Unique(entropy) })
     }
 
-    
     pub fn prediction_resistance(&self) -> bool {
-        if self.inner.prediction_resistance == CTR_DRBG_PR_OFF {
-            false
-        } else {
-            true
-        }
+        self.inner.private_prediction_resistance != CTR_DRBG_PR_OFF
     }
 
     pub fn set_prediction_resistance(&mut self, pr: bool) {
@@ -108,9 +103,9 @@ impl CtrDrbg {
         }
     }
 
-    getter!(entropy_len() -> size_t = .entropy_len);
+    getter!(entropy_len() -> size_t = .private_entropy_len);
     setter!(set_entropy_len(len: size_t) = ctr_drbg_set_entropy_len);
-    getter!(reseed_interval() -> c_int = .reseed_interval);
+    getter!(reseed_interval() -> c_int = .private_reseed_interval);
     setter!(set_reseed_interval(i: c_int) = ctr_drbg_set_reseed_interval);
 
     pub fn reseed(&mut self, additional_entropy: Option<&[u8]>) -> Result<()> {

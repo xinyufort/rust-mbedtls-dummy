@@ -16,7 +16,7 @@ use mbedtls_sys::types::raw_types::{c_char, c_void};
 use crate::alloc::{List as MbedtlsList, Box as MbedtlsBox, mbedtls_calloc};
 #[cfg(not(feature = "std"))]
 use crate::alloc_prelude::*;
-use crate::error::{Error, IntoResult, Result, codes};
+use crate::error::{IntoResult, Result, codes};
 use crate::hash::Type as MdType;
 use crate::pk::Pk;
 use crate::private::UnsafeFrom;
@@ -206,17 +206,21 @@ impl Certificate {
                 }
             })?;
             return Ok(());
-        }).map_err(|_| Error::from(codes::X509InvalidExtensions))?;
+        }).map_err(|_| codes::X509InvalidExtensions)?;
 
         Ok(ext)
     }
 
     pub fn signature(&self) -> Result<Vec<u8>> {
-        Ok(x509_buf_to_vec(&self.inner.sig))
+        // access `private_` field here becauase C mbedtls does not provide accessor
+        // TODO: need to be replaced with accessor, ref: #283
+        Ok(x509_buf_to_vec(&self.inner.private_sig))
     }
 
     pub fn digest_type(&self) -> MdType {
-        MdType::from(self.inner.sig_md)
+        // access `private_` field here becauase C mbedtls does not provide accessor
+        // TODO: need to be replaced with accessor, ref: #283
+        MdType::from(self.inner.private_sig_md)
     }
 
     fn verify_ex<F>(
@@ -503,7 +507,7 @@ impl MbedtlsBox<Certificate> {
             // If alignment is wrong it means someone pushed their own allocator to mbedtls and that is not functioning correctly.
             assert_eq!(inner.align_offset(core::mem::align_of::<x509_crt>()), 0);
 
-            let inner = NonNull::new(inner).ok_or(Error::from(codes::X509AllocFailed))?;
+            let inner = NonNull::new(inner).ok_or(codes::X509AllocFailed)?;
             x509_crt_init(inner.as_ptr());
             
             Ok(MbedtlsBox { inner: inner.cast() })
@@ -755,8 +759,8 @@ mod tests {
     impl Test {
         fn new() -> Self {
             Test {
-                key1: Pk::from_private_key(crate::test_support::keys::PEM_SELF_SIGNED_KEY, None).unwrap(),
-                key2: Pk::from_private_key(crate::test_support::keys::PEM_SELF_SIGNED_KEY, None).unwrap(),
+                key1: Pk::from_private_key(&mut crate::test_support::rand::test_rng(), crate::test_support::keys::PEM_SELF_SIGNED_KEY, None).unwrap(),
+                key2: Pk::from_private_key(&mut crate::test_support::rand::test_rng(), crate::test_support::keys::PEM_SELF_SIGNED_KEY, None).unwrap(),
             }
         }
 
@@ -1463,7 +1467,7 @@ cYp0bH/RcPTC0Z+ZaqSWMtfxRrk63MJQF9EXpDCdvQRcTMD9D85DJrMKn8aumq0M
     #[test]
     fn test_combined_error_from_mbedtls() {
         let err = super::x509::Certificate::from_der(&b"\x30\x02\x05\x00"[..]).unwrap_err();
-        assert_eq!(err, Error::HighAndLowLevel(codes::X509InvalidFormat, codes::Asn1UnexpectedTag));
+        assert_eq!(err, crate::Error::HighAndLowLevel(codes::X509InvalidFormat, codes::Asn1UnexpectedTag));
     }
 
 }

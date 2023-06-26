@@ -11,7 +11,6 @@ use bindgen;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;
-use bindgen::Formatter;
 
 use crate::headers;
 
@@ -20,7 +19,21 @@ struct MbedtlsParseCallbacks;
 
 impl bindgen::callbacks::ParseCallbacks for MbedtlsParseCallbacks {
     fn item_name(&self, original_item_name: &str) -> Option<String> {
-        Some(original_item_name.trim_start_matches("mbedtls_").trim_start_matches("MBEDTLS_").to_owned())
+        // clean up generated static function suffix
+        let new_item_name = original_item_name.trim_end_matches("__extern");
+        // remove redundant prefix for code in mbedtls lib
+        Some(if new_item_name.starts_with("mbedtls_") {
+            new_item_name.trim_start_matches("mbedtls_").to_string()
+        } else if new_item_name.starts_with("MBEDTLS_") {
+            new_item_name.trim_start_matches("MBEDTLS_").to_string()
+        // remove redundant prefix for code in psa lib
+        } else if new_item_name.starts_with("psa_") {
+            new_item_name.trim_start_matches("psa_").to_string()
+        } else if new_item_name.starts_with("PSA_") {
+            new_item_name.trim_start_matches("PSA_").to_string()
+        } else {
+            new_item_name.to_string()
+        })
     }
 
     fn enum_variant_name(
@@ -49,44 +62,14 @@ impl bindgen::callbacks::ParseCallbacks for MbedtlsParseCallbacks {
     }
 }
 
-/// Add bindgen 0.19-style union accessor methods. These are deprecated
-/// and can be deleted with the next major version bump.
-fn generate_deprecated_union_accessors(bindings: &str) -> String {
-    #[derive(Default)]
-    struct UnionImplBuilder {
-        impls: String
-    }
-
-    impl<'ast> syn::visit::Visit<'ast> for UnionImplBuilder {
-        fn visit_item_union(&mut self, i: &'ast syn::ItemUnion) {
-            let union_name = &i.ident;
-            let field_name = i.fields.named.iter().map(|field| field.ident.as_ref().unwrap());
-            let field_type = i.fields.named.iter().map(|field| &field.ty);
-            write!(self.impls, "{}", quote::quote! {
-                impl #union_name {
-                    #(
-                        #[deprecated]
-                        pub unsafe fn #field_name(&mut self) -> *mut #field_type {
-                            &mut self.#field_name
-                        }
-                    )*
-                }
-            }).unwrap();
-        }
-    }
-
-    let mut impl_builder = UnionImplBuilder::default();
-    syn::visit::visit_file(&mut impl_builder, &syn::parse_file(&bindings).unwrap());
-
-    impl_builder.impls
-}
-
 impl super::BuildConfig {
     pub fn bindgen(&self) {
-        let mut input = String::new();
+        let mut header = String::new();
         for h in headers::enabled_ordered() {
-            let _ = writeln!(input, "#include <mbedtls/{}>", h);
+            let _ = writeln!(header, "#include <mbedtls/{}>", h);
         }
+        // add psa header
+        header.push_str("#include <psa/crypto.h>\n");
 
         let mut cc = cc::Build::new();
         cc.include(&self.mbedtls_include)
@@ -117,38 +100,46 @@ impl super::BuildConfig {
             };
         }
 
-        let bindings = bindgen::builder()
-            .enable_function_attribute_detection()
+        
+        // generate static function wrappers without any other rust related parameters to ensure
+        // correctness of result C code
+        bindgen::builder()
             .clang_args(cc.get_compiler().args().iter().map(|arg| arg.to_str().unwrap()))
-            .header_contents("bindgen-input.h", &input)
+            .header_contents("bindgen-input.h", &header)
+            .wrap_static_fns(true)
+            .wrap_static_fns_path(&self.static_wrappers_c)
+            .generate().expect("bindgen error");
+
+        // use headers with static function wrappers to generate bindings
+        let static_wrappers_code = fs::read_to_string(&self.static_wrappers_c).expect("read static_wrappers.c I/O error");
+        let header = format!("{}\n{}", &header, static_wrappers_code);
+        // generate bindings for `mbedtls` code
+        let bindings = bindgen_builder(&cc, &header)
             .allowlist_function("^(?i)mbedtls_.*")
             .allowlist_type("^(?i)mbedtls_.*")
             .allowlist_var("^(?i)mbedtls_.*")
-            .allowlist_recursively(false)
-            .blocklist_type("^mbedtls_time_t$")
-            .use_core()
-            .ctypes_prefix("::types::raw_types")
-            .parse_callbacks(Box::new(MbedtlsParseCallbacks))
-            .default_enum_style(bindgen::EnumVariation::Consts)
-            .generate_comments(false)
-            .derive_copy(true)
-            .derive_debug(false) // buggy :(
-            .derive_default(true)
-            .prepend_enum_name(false)
-            .translate_enum_integer_types(true)
-            .formatter(Formatter::None)
             .raw_line("#![allow(dead_code, deref_nullptr, non_snake_case, non_camel_case_types, non_upper_case_globals, invalid_value)]")
             .generate()
-            .expect("bindgen error")
+            .expect("bindgen mbedtls error")
             .to_string();
-
-        let union_impls = generate_deprecated_union_accessors(&bindings);
+        // generate bindings for `psa` code
+        let psa_bindings = bindgen_builder(&cc, &header)
+            .allowlist_function("^(?i)psa_.*")
+            .allowlist_type("^(?i)psa_.*")
+            .allowlist_var("^(?i)psa_.*")
+            .generate()
+            .expect("bindgen psa error")
+            .to_string();
+        // update static function wrappers code with header for later compilation 
+        fs::write(&self.static_wrappers_c, &header).expect("write static_wrappers.c I/O error");
 
         let bindings_rs = self.out_dir.join("bindings.rs");
         File::create(&bindings_rs)
             .and_then(|mut f| {
                 f.write_all(bindings.as_bytes())?;
-                f.write_all(union_impls.as_bytes())?;
+                // put bindings of psa code inside a module
+                f.write_all(format!("pub mod psa {{\n{}{}\n}}\n", "use super::*;\n",psa_bindings).as_bytes())?;
+                f.write_all(b"use self::psa::*;\n")?;
                 f.write_all(b"use crate::types::*;\n")?; // for FILE, time_t, etc.
                 Ok(())
             }).expect("bindings.rs I/O error");
@@ -157,3 +148,25 @@ impl super::BuildConfig {
         fs::write(mod_bindings, b"mod bindings;\n").expect("mod-bindings.rs I/O error");
     }
 }
+
+// create a bindgen builder with common parameters
+fn bindgen_builder(cc: &cc::Build, header: &String) -> bindgen::Builder {
+    bindgen::builder()
+        .enable_function_attribute_detection()
+        .clang_args(cc.get_compiler().args().iter().map(|arg| arg.to_str().unwrap()))
+        .header_contents("bindgen-input.h", header)
+        .allowlist_recursively(false)
+        .blocklist_type("^mbedtls_time_t$")
+        .use_core()
+        .ctypes_prefix("::types::raw_types")
+        .parse_callbacks(Box::new(MbedtlsParseCallbacks))
+        .default_enum_style(bindgen::EnumVariation::Consts)
+        .generate_comments(false)
+        .derive_copy(true)
+        .derive_debug(false) // buggy :(
+        .derive_default(true)
+        .prepend_enum_name(false)
+        .translate_enum_integer_types(true)
+        .layout_tests(false)
+}
+
