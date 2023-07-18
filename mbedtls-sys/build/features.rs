@@ -36,6 +36,9 @@ impl Features {
             env_have_target_cfg("env", "sgx") ||
             env_have_target_cfg("os", "none") {
             self.with_feature("c_compiler").unwrap().insert("freestanding");
+            if let Some(components) = self.with_feature("tls13") {
+                components.insert("external_entropy");
+            }
         }
         if let Some(components) = self.with_feature("threading") {
             if !have_custom_threading && env_have_target_cfg("family", "unix") {
@@ -88,7 +91,7 @@ impl Features {
     }
 }
 
-fn env_have_target_cfg(var: &'static str, value: &'static str) -> bool {
+pub(super) fn env_have_target_cfg(var: &'static str, value: &'static str) -> bool {
     let env = format!("CARGO_CFG_TARGET_{}", var).to_uppercase().replace("-", "_");
     env::var_os(env).map_or(false, |s| s == value)
 }

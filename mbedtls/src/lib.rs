@@ -7,15 +7,19 @@
  * according to those terms. */
 
 #![deny(warnings)]
+// TODO: this is added to ensure `#![allow(ambiguous_glob_reexports)]` also works
+// in rust with old version, need to be removed after migration to rustc 1.70..,
+// See issue #277
+#![allow(unknown_lints)]
+// TODO: need to be removed after migration to rustc 1.70.., issue #277
+#![allow(ambiguous_glob_reexports)]
 #![allow(unused_doc_comments)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(not(any(feature = "std", feature = "no_std_deps")))]
 compile_error!("Either the `std` or `no_std_deps` feature needs to be enabled");
 
-#[cfg(not(feature = "std"))]
-#[macro_use]
-extern crate alloc as rust_alloc;
+
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
@@ -31,57 +35,42 @@ mod wrapper_macros;
 //      API
 // ==============
 pub mod bignum;
-mod error;
+pub mod error;
 pub use crate::error::{Error, Result};
+
 pub mod cipher;
 pub mod ecp;
 pub mod hash;
 pub mod pk;
 pub mod rng;
-pub mod self_test;
+pub use mbedtls_platform_support::self_test as self_test;
 pub mod ssl;
 pub mod x509;
 pub mod alloc;
-
-#[cfg(feature = "pkcs12")]
-pub mod pkcs12;
 
 // ==============
 //    Utility
 // ==============
 mod private;
 
-// needs to be pub for global visiblity
+// needs to be pub for global visibility
 #[doc(hidden)]
 #[cfg(sys_threading_component = "custom")]
 pub mod threading;
 
 cfg_if::cfg_if! {
     if #[cfg(any(feature = "force_aesni_support", target_env = "sgx"))] {
-        // needs to be pub for global visiblity
+        // needs to be pub for global visibility
         #[doc(hidden)]
-        #[no_mangle]
-        pub extern "C" fn mbedtls_aesni_has_support(_what: u32) -> i32 {
-            return 1;
-        }
+        pub use mbedtls_platform_support::mbedtls_aesni_has_support;
 
-        // needs to be pub for global visiblity
+        // needs to be pub for global visibility
         #[doc(hidden)]
-        #[no_mangle]
-        pub extern "C" fn mbedtls_internal_aes_encrypt(_ctx: *mut mbedtls_sys::types::raw_types::c_void,
-                                                       _input: *const u8,
-                                                       _output: *mut u8) -> i32 {
-            panic!("AES-NI support is forced but the T-tables code was invoked")
-        }
+        pub use mbedtls_platform_support::mbedtls_internal_aes_encrypt;
 
-        // needs to be pub for global visiblity
+        // needs to be pub for global visibility
         #[doc(hidden)]
-        #[no_mangle]
-        pub extern "C" fn mbedtls_internal_aes_decrypt(_ctx: *mut mbedtls_sys::types::raw_types::c_void,
-                                                       _input: *const u8,
-                                                       _output: *mut u8) -> i32 {
-            panic!("AES-NI support is forced but the T-tables code was invoked")
-        }
+        pub use mbedtls_platform_support::mbedtls_internal_aes_decrypt;
     }
 }
 
@@ -92,6 +81,17 @@ mod test_support;
 mod mbedtls {
     pub use super::*;
 }
+
+/// You need to call `psa_crypto_init()` before calling any function from the SSL/TLS, X.509 or PK modules.
+/// This function is fine to be called mutiple times while ensure underlying initilization function is only
+/// been called only once.
+/// Re-export here for convenience.
+#[cfg(feature = "tls13")]
+pub use mbedtls_platform_support::psa_crypto_init;
+
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc as rust_alloc;
 
 #[cfg(not(feature = "std"))]
 mod alloc_prelude {
@@ -107,46 +107,14 @@ mod alloc_prelude {
 
 cfg_if::cfg_if! {
     if #[cfg(sys_time_component = "custom")] {
-        use mbedtls_sys::types::{time_t, tm};
 
-        // needs to be pub for global visiblity
+        // needs to be pub for global visibility
         #[doc(hidden)]
-        #[no_mangle]
-        pub unsafe extern "C" fn mbedtls_platform_gmtime_r(tt: *const time_t, tp: *mut tm) -> *mut tm {
-            use chrono::prelude::*;
+        pub use mbedtls_platform_support::mbedtls_platform_gmtime_r;
 
-            //0 means no TZ offset
-            let naive = if tp.is_null() {
-                return core::ptr::null_mut()
-            } else {
-                NaiveDateTime::from_timestamp(*tt, 0)
-            };
-            let utc = DateTime::<Utc>::from_utc(naive, Utc);
-
-            let tp = &mut *tp;
-            tp.tm_sec   = utc.second()   as i32;
-            tp.tm_min   = utc.minute()   as i32;
-            tp.tm_hour  = utc.hour()     as i32;
-            tp.tm_mday  = utc.day()      as i32;
-            tp.tm_mon   = utc.month0()   as i32;
-            tp.tm_year  = utc.year()     as i32 - 1900;
-            tp.tm_wday  = utc.weekday().num_days_from_monday() as i32;
-            tp.tm_yday  = utc.ordinal0() as i32;
-            tp.tm_isdst = 0;
-
-            tp
-        }
-
-        // needs to be pub for global visiblity
+        // needs to be pub for global visibility
         #[doc(hidden)]
-        #[no_mangle]
-        pub unsafe extern "C" fn mbedtls_time(tp: *mut time_t) -> time_t {
-            let timestamp = chrono::Utc::now().timestamp() as time_t;
-            if !tp.is_null() {
-                *tp = timestamp;
-            }
-            timestamp
-        }
+        pub use mbedtls_platform_support::mbedtls_time;
     }
 }
 

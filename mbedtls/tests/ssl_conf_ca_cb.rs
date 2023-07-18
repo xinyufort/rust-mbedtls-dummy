@@ -24,18 +24,21 @@ use mbedtls::ssl::config::CaCallback;
 
 mod support;
 use support::entropy::entropy_new;
-
-use mbedtls::alloc::{List as MbedtlsList};
+use support::rand::test_rng;
 
 fn client<F>(conn: TcpStream, ca_callback: F) -> TlsResult<()>
-    where
-        F: CaCallback + Send + 'static,
+where
+    F: CaCallback + Send + 'static,
 {
     let entropy = entropy_new();
     let rng = Arc::new(CtrDrbg::new(Arc::new(entropy), None)?);
     let mut config = Config::new(Endpoint::Client, Transport::Stream, Preset::Default);
     config.set_rng(rng);
     config.set_ca_callback(ca_callback);
+    // `set_ca_callback` for TLS client is only available in TLS 1.2
+    // In TLS 1.3, TLS client no longer support CA callback.
+    config.set_min_version(mbedtls::ssl::Version::Tls12)?;
+    config.set_max_version(mbedtls::ssl::Version::Tls12)?;
     let mut ctx = Context::new(Arc::new(config));
     ctx.establish(conn, None).map(|_| ())
 }
@@ -44,10 +47,14 @@ fn server(conn: TcpStream, cert: &[u8], key: &[u8]) -> TlsResult<()> {
     let entropy = entropy_new();
     let rng = Arc::new(CtrDrbg::new(Arc::new(entropy), None)?);
     let cert = Arc::new(Certificate::from_pem_multiple(cert)?);
-    let key = Arc::new(Pk::from_private_key(key, None)?);
+    let key = Arc::new(Pk::from_private_key(&mut test_rng(), key, None)?);
     let mut config = Config::new(Endpoint::Server, Transport::Stream, Preset::Default);
     config.set_rng(rng);
     config.push_cert(cert, key)?;
+    // The certificates in this test now only support TLS 1.2
+    // TODO: update tests to cover TLS 1.3
+    config.set_min_version(mbedtls::ssl::Version::Tls12)?;
+    config.set_max_version(mbedtls::ssl::Version::Tls12)?;
     let mut ctx = Context::new(Arc::new(config));
 
     let _ = ctx.establish(conn, None);
@@ -60,8 +67,9 @@ mod test {
     use std::thread;
     use crate::support::net::create_tcp_pair;
     use crate::support::keys;
-    use mbedtls::x509::{Certificate};
-    use mbedtls::Error;
+    use mbedtls::alloc::List as MbedtlsList;
+    use mbedtls::x509::Certificate;
+    use mbedtls::error::codes;
 
     // This callback should accept any valid self-signed certificate
     fn self_signed_ca_callback(child: &MbedtlsList<Certificate>) -> TlsResult<MbedtlsList<Certificate>> {
@@ -74,8 +82,8 @@ mod test {
 
         let ca_callback =
             |_: &MbedtlsList<Certificate>| -> TlsResult<MbedtlsList<Certificate>> {
-                Ok(Certificate::from_pem_multiple(keys::ROOT_CA_CERT.as_bytes()).unwrap())
-            };
+            Ok(Certificate::from_pem_multiple(keys::ROOT_CA_CERT.as_bytes()).unwrap())
+        };
         let c = thread::spawn(move || super::client(c, ca_callback).unwrap());
         let s = thread::spawn(move || super::server(s, keys::PEM_CERT.as_bytes(), keys::PEM_KEY.as_bytes()).unwrap());
         c.join().unwrap();
@@ -91,7 +99,7 @@ mod test {
             };
         let c = thread::spawn(move || {
             let result = super::client(c, ca_callback);
-            assert_eq!(result, Err(Error::X509CertVerifyFailed));
+            assert_eq!(result, Err(codes::X509CertVerifyFailed.into()));
         });
         let s = thread::spawn(move || super::server(s, keys::PEM_CERT.as_bytes(), keys::PEM_KEY.as_bytes()).unwrap());
         c.join().unwrap();
@@ -114,7 +122,7 @@ mod test {
         let (c, s) = create_tcp_pair().unwrap();
         let c = thread::spawn(move || {
             let result = super::client(c, self_signed_ca_callback);
-            assert_eq!(result, Err(Error::X509CertVerifyFailed));
+            assert_eq!(result, Err(codes::X509CertVerifyFailed.into()));
         });
         let s = thread::spawn(move || super::server(s, keys::PEM_CERT.as_bytes(), keys::PEM_KEY.as_bytes()).unwrap());
         c.join().unwrap();
@@ -128,7 +136,7 @@ mod test {
         let (c, s) = create_tcp_pair().unwrap();
         let c = thread::spawn(move || {
             let result = super::client(c, self_signed_ca_callback);
-            assert_eq!(result, Err(Error::X509CertVerifyFailed));
+            assert_eq!(result, Err(codes::X509CertVerifyFailed.into()));
         });
         let s = thread::spawn(move || super::server(s, keys::PEM_SELF_SIGNED_CERT_INVALID_SIG, keys::PEM_SELF_SIGNED_KEY).unwrap());
         c.join().unwrap();

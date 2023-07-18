@@ -6,7 +6,7 @@
  * option. This file may not be copied, modified, or distributed except
  * according to those terms. */
 
-use crate::error::{Error, IntoResult, Result};
+use crate::error::{IntoResult, Result, codes};
 use mbedtls_sys::*;
 
 define!(
@@ -14,8 +14,6 @@ define!(
     #[derive(Copy, Clone, PartialEq, Debug)]
     enum Type {
         None = MD_NONE,
-        Md2 = MD_MD2,
-        Md4 = MD_MD4,
         Md5 = MD_MD5,
         Sha1 = MD_SHA1,
         Sha224 = MD_SHA224,
@@ -30,8 +28,6 @@ impl From<md_type_t> for Type {
     fn from(inner: md_type_t) -> Type {
         match inner {
             MD_NONE => Type::None,
-            MD_MD2 => Type::Md2,
-            MD_MD4 => Type::Md4,
             MD_MD5 => Type::Md5,
             MD_SHA1 => Type::Sha1,
             MD_SHA224 => Type::Sha224,
@@ -82,7 +78,7 @@ impl Md {
     pub fn new(md: Type) -> Result<Md> {
         let md: MdInfo = match md.into() {
             Some(md) => md,
-            None => return Err(Error::MdBadInputData),
+            None => return Err(codes::MdBadInputData.into()),
         };
 
         let mut ctx = Md::init();
@@ -100,9 +96,9 @@ impl Md {
 
     pub fn finish(mut self, out: &mut [u8]) -> Result<usize> {
         unsafe {
-            let olen = (*self.inner.md_info).size as usize;
+            let olen = md_get_size(md_info_from_ctx(&self.inner)) as usize;
             if out.len() < olen {
-                return Err(Error::MdBadInputData);
+                return Err(codes::MdBadInputData.into());
             }
             md_finish(&mut self.inner, out.as_mut_ptr()).into_result()?;
             Ok(olen)
@@ -112,13 +108,13 @@ impl Md {
     pub fn hash(mdt: Type, data: &[u8], out: &mut [u8]) -> Result<usize> {
         let mdinfo: MdInfo = match mdt.into() {
             Some(md) => md,
-            None => return Err(Error::MdBadInputData),
+            None => return Err(codes::MdBadInputData.into()),
         };
 
         unsafe {
-            let olen = mdinfo.inner.size as usize;
+            let olen = md_get_size(mdinfo.inner) as usize;
             if out.len() < olen {
-                return Err(Error::MdBadInputData);
+                return Err(codes::MdBadInputData.into());
             }
             md(mdinfo.inner, data.as_ptr(), data.len(), out.as_mut_ptr()).into_result()?;
             Ok(olen)
@@ -134,7 +130,7 @@ impl Hmac {
     pub fn new(md: Type, key: &[u8]) -> Result<Hmac> {
         let md: MdInfo = match md.into() {
             Some(md) => md,
-            None => return Err(Error::MdBadInputData),
+            None => return Err(codes::MdBadInputData.into()),
         };
 
         let mut ctx = Md::init();
@@ -152,9 +148,9 @@ impl Hmac {
 
     pub fn finish(mut self, out: &mut [u8]) -> Result<usize> {
         unsafe {
-            let olen = (*self.ctx.inner.md_info).size as usize;
+            let olen = md_get_size(md_info_from_ctx(&self.ctx.inner)) as usize;
             if out.len() < olen {
-                return Err(Error::MdBadInputData);
+                return Err(codes::MdBadInputData.into());
             }
             md_hmac_finish(&mut self.ctx.inner, out.as_mut_ptr()).into_result()?;
             Ok(olen)
@@ -164,13 +160,13 @@ impl Hmac {
     pub fn hmac(md: Type, key: &[u8], data: &[u8], out: &mut [u8]) -> Result<usize> {
         let md: MdInfo = match md.into() {
             Some(md) => md,
-            None => return Err(Error::MdBadInputData),
+            None => return Err(codes::MdBadInputData.into()),
         };
 
         unsafe {
-            let olen = md.inner.size as usize;
+            let olen = md_get_size(md.inner) as usize;
             if out.len() < olen {
-                return Err(Error::MdBadInputData);
+                return Err(codes::MdBadInputData.into());
             }
             md_hmac(
                 md.inner,
@@ -194,7 +190,7 @@ impl Hkdf {
     pub fn hkdf(md: Type, salt: &[u8], ikm: &[u8], info: &[u8], key: &mut [u8]) -> Result<()> {
         let md: MdInfo = match md.into() {
             Some(md) => md,
-            None => return Err(Error::MdBadInputData),
+            None => return Err(codes::MdBadInputData.into()),
         };
 
         unsafe {
@@ -218,7 +214,7 @@ impl Hkdf {
 impl Clone for Md {
     fn clone(&self) -> Self {
         fn copy_md(md: &Md) -> Result<Md> {
-            let md_type = unsafe { md_get_type(md.inner.md_info) };
+            let md_type = unsafe { md_get_type(md_info_from_ctx(&md.inner)) };
             let mut m = Md::new(md_type.into())?;
             unsafe { md_clone(&mut m.inner, &md.inner) }.into_result()?;
             Ok(m)
@@ -234,16 +230,9 @@ pub fn pbkdf2_hmac(
     iterations: u32,
     key: &mut [u8],
 ) -> Result<()> {
-    let md: MdInfo = match md.into() {
-        Some(md) => md,
-        None => return Err(Error::MdBadInputData),
-    };
-
     unsafe {
-        let mut ctx = Md::init();
-        md_setup((&mut ctx).into(), md.into(), 1).into_result()?;
-        pkcs5_pbkdf2_hmac(
-            (&mut ctx).into(),
+        pkcs5_pbkdf2_hmac_ext(
+            md.into(),
             password.as_ptr(),
             password.len(),
             salt.as_ptr(),
@@ -251,31 +240,6 @@ pub fn pbkdf2_hmac(
             iterations,
             key.len() as u32,
             key.as_mut_ptr(),
-        )
-        .into_result()?;
-        Ok(())
-    }
-}
-
-pub fn pbkdf_pkcs12(
-    md: Type,
-    password: &[u8],
-    salt: &[u8],
-    id: u8,
-    iterations: u32,
-    key: &mut [u8],
-) -> Result<()> {
-    unsafe {
-        pkcs12_derivation(
-            key.as_mut_ptr(),
-            key.len(),
-            password.as_ptr(),
-            password.len(),
-            salt.as_ptr(),
-            salt.len(),
-            md.into(),
-            id as i32,
-            iterations as i32,
         )
         .into_result()?;
         Ok(())

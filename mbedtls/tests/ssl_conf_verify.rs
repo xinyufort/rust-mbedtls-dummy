@@ -18,13 +18,14 @@ use mbedtls::rng::CtrDrbg;
 use mbedtls::ssl::config::{Endpoint, Preset, Transport};
 use mbedtls::ssl::{Config, Context};
 use mbedtls::x509::{Certificate, VerifyError};
-use mbedtls::Error;
+use mbedtls::{Error, error::codes};
 use mbedtls::Result as TlsResult;
 
 mod support;
 use support::entropy::entropy_new;
 use support::keys;
 use std::sync::Arc;
+use support::rand::test_rng;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Test {
@@ -44,10 +45,10 @@ fn client(conn: TcpStream, test: Test) -> TlsResult<()> {
                 *verify_flags |= VerifyError::CERT_OTHER;
                 Ok(())
             }
-            Test::CallbackError => Err(Error::Asn1InvalidData),
+            Test::CallbackError => Err(codes::Asn1InvalidData.into()),
         }
     };
-    
+
     let mut config = Config::new(Endpoint::Client, Transport::Stream, Preset::Default);
     config.set_rng(rng);
     config.set_verify_callback(verify_callback);
@@ -60,13 +61,13 @@ fn client(conn: TcpStream, test: Test) -> TlsResult<()> {
             .err()
             .expect("should have failed"),
     ) {
-        (Test::CallbackSetVerifyFlags, Error::X509CertVerifyFailed) => {
+        (Test::CallbackSetVerifyFlags, Error::HighLevel(codes::X509CertVerifyFailed)) => {
             assert_eq!(
                 ctx.verify_result().unwrap_err(),
                 VerifyError::CERT_OTHER | VerifyError::CERT_NOT_TRUSTED,
             );
         }
-        (Test::CallbackError, Error::Asn1InvalidData) => {}
+        (Test::CallbackError, Error::LowLevel(codes::Asn1InvalidData)) => {}
         (_, err) => assert!(false, "Unexpected error from ctx.establish(): {:?}", err),
     }
 
@@ -77,7 +78,7 @@ fn server(conn: TcpStream) -> TlsResult<()> {
     let entropy = entropy_new();
     let rng = Arc::new(CtrDrbg::new(Arc::new(entropy), None)?);
     let cert = Arc::new(Certificate::from_pem_multiple(keys::PEM_CERT.as_bytes())?);
-    let key = Arc::new(Pk::from_private_key(keys::PEM_KEY.as_bytes(), None)?);
+    let key = Arc::new(Pk::from_private_key(&mut test_rng(), keys::PEM_KEY.as_bytes(), None)?);
     let mut config = Config::new(Endpoint::Server, Transport::Stream, Preset::Default);
     config.set_rng(rng);
     config.push_cert(cert, key)?;

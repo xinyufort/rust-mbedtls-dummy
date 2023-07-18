@@ -31,6 +31,7 @@ struct BuildConfig {
     mbedtls_include: PathBuf,
     config_h: PathBuf,
     cflags: Vec<String>,
+    static_wrappers_c: PathBuf,
 }
 
 impl BuildConfig {
@@ -62,7 +63,12 @@ impl BuildConfig {
                 if FEATURES.have_platform_component("time", "custom") {
                     writeln!(f, "long long mbedtls_time(long long*);")?;
                 }
-                f.write_all(config::SUFFIX.as_bytes())
+                f.write_all(config::SUFFIX.as_bytes())?;
+
+                if features::env_have_target_cfg("env", "sgx") {
+                    f.write_all(config::INLINE_MEMCPY_SUFFIX.as_bytes())?;
+                }
+                Ok(())
             })
             .expect("config.h I/O error");
     }
@@ -95,6 +101,7 @@ impl BuildConfig {
         let config_h = out_dir.join("config.h");
         let mbedtls_src = PathBuf::from(env::var("RUST_MBEDTLS_SYS_SOURCE").unwrap_or("vendor".to_owned()));
         let mbedtls_include = mbedtls_src.join("include");
+        let static_wrappers_c = out_dir.join("static_wrappers.c");
 
         let mut cflags = vec![];
         if FEATURES.have_platform_component("c_compiler", "freestanding") {
@@ -103,6 +110,11 @@ impl BuildConfig {
             cflags.push("-D_FORTIFY_SOURCE=0".into());
             cflags.push("-fno-stack-protector".into());
         }
+        if features::env_have_target_cfg("env", "sgx") {
+            // In SGX, define memcpy to another string, so could ensure the inline functions added above in config.h
+            // always take effect. This is necessary because source file may include `string.h` before include `config.h`.
+            cflags.push("-Dmemcpy=not_memcpy_".into());
+        }
 
         BuildConfig {
             config_h,
@@ -110,7 +122,28 @@ impl BuildConfig {
             mbedtls_src,
             mbedtls_include,
             cflags,
+            static_wrappers_c
         }
+    }
+
+    // compile static function wrappers
+    fn build_static_wrappers(&self) {
+        let mut cc = cc::Build::new();
+        cc.include(&self.mbedtls_include)
+        .flag(&format!(
+            "-DMBEDTLS_CONFIG_FILE=\"{}\"",
+            self.config_h.to_str().expect("config.h UTF-8 error")
+        ));
+        for cflag in &self.cflags {
+            cc.flag(cflag);
+        }
+        if FEATURES.have_platform_component("c_compiler", "freestanding") {
+            cc.flag("-ffreestanding");
+        }
+        cc
+        .flag_if_supported("-flto=thin")
+        .file(&self.static_wrappers_c)
+        .compile("libstatic-wrappers.a");
     }
 }
 
@@ -120,4 +153,5 @@ fn main() {
     cfg.print_rerun_files();
     cfg.cmake();
     cfg.bindgen();
+    cfg.build_static_wrappers();
 }
