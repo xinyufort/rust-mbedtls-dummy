@@ -1596,7 +1596,7 @@ static int rsa_rsassa_pss_sign( mbedtls_rsa_context *ctx,
     RSA_VALIDATE_RET( sig != NULL );
 
     printf("\nInside rsa_rsassa_pss_sign in C Mbed TLS code. File library/rsa.c\n");
-    printf("md_alg is %d, and ctx->hash_id is %d\n\n", md_alg, ctx->hash_id);
+    printf("md_alg is %u, and ctx->hash_id is %d\n\n", md_alg, ctx->hash_id);
 
     if( mode == MBEDTLS_RSA_PRIVATE && ctx->padding != MBEDTLS_RSA_PKCS_V21 )
         return( MBEDTLS_ERR_RSA_BAD_INPUT_DATA );
